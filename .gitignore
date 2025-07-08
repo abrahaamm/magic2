@@ -1,0 +1,16 @@
+# 大文件
+*.pkl
+*.json.txt
+
+# Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.temp 
