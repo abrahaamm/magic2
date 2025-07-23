@@ -10,6 +10,11 @@ from sklearn.metrics import accuracy_score, f1_score, classification_report
 from model.eval import batch_level_evaluation, evaluate_entity_level_using_knn
 from utils.config import build_args
 import os
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+import time
+from sklearn.neighbors import LocalOutlierFactor
+
 warnings.filterwarnings('ignore')
 
 
@@ -77,7 +82,7 @@ def main(main_args):
         classifier.load_state_dict(torch.load(classifier_path, map_location=device))
         classifier.eval()
 
-        all_preds, all_labels = [], []
+        all_preds, all_labels, all_embeddings = [], [], []
         total_nodes = 0
         n_test = metadata['n_test']
 
@@ -87,15 +92,15 @@ def main(main_args):
         
         # 节点类型名称映射
         node_type_names = {
-            0: "SRCSINK_UNKNOWN",
-            1: "SUBJECT",
-            2: "FILE_OBJECT",
-            3: "MEMORY_OBJECT",
-            4: "NETFLOW_OBJECT",
-            5: "PRINCIPAL",
-            6: "PROCESS",
-            7: "THREAD",
-            8: "UNNAMED_PIPE_OBJECT",
+            0: "SUBJECT_PROCESS",
+            1: "SRCSINK_UNKNOWN",
+            2: "FILE_OBJECT_UNIX_SOCKET",
+            3: "NetFlowObject",
+            4: "FILE_OBJECT_FILE",
+            5: "MemoryObject",
+            6: "FILE_OBJECT_CHAR",
+            7: "FILE_OBJECT_DIR",
+            8: "UnnamedPipeObject",
             9: "FILE_OBJECT_LINK",
             10: "FILE_OBJECT_BLOCK"
         }
@@ -112,6 +117,7 @@ def main(main_args):
                 
                 all_preds.extend(node_preds.cpu().numpy())
                 all_labels.extend(node_labels.cpu().numpy())
+                all_embeddings.append(node_embeddings.cpu().numpy())
                 total_nodes += g.number_of_nodes()
                 
                 del g, node_embeddings, node_logits
@@ -166,6 +172,205 @@ def main(main_args):
               f"{report_dict['weighted avg']['f1-score']:>10.2%} "
               f"{total_nodes:>12,d} {100:>9.2f}%")
         print("=" * 120)
+
+        # ------------------ t-SNE 可视化 ------------------
+        print("\n正在进行 t-SNE 降维和可视化...")
+        start_time = time.time()
+
+        # 将嵌入和标签列表转换为Numpy数组
+        all_embeddings = np.concatenate(all_embeddings, axis=0)
+        all_labels = np.array(all_labels)
+        all_preds = np.array(all_preds) # 新增：转换预测结果
+
+        # 找到分类错误的节点
+        misclassified_indices = np.where(all_labels != all_preds)[0]
+        misclassified_labels = all_labels[misclassified_indices]
+        misclassified_preds = all_preds[misclassified_indices]
+
+        # 保存分类错误的节点信息
+        misclassified_output_path = './misclassified_nodes.txt'
+        with open(misclassified_output_path, 'w') as f:
+            f.write("Misclassified Node Information\n")
+            f.write("-" * 50 + "\n")
+            f.write(f"{'Node Index':<15} {'True Label':<25} {'Predicted Label':<25}\n")
+            f.write("-" * 50 + "\n")
+            for i, idx in enumerate(misclassified_indices):
+                true_label_name = node_type_names.get(misclassified_labels[i], f"类型_{misclassified_labels[i]}")
+                pred_label_name = node_type_names.get(misclassified_preds[i], f"类型_{misclassified_preds[i]}")
+                f.write(f"{idx:<15} {true_label_name:<25} {pred_label_name:<25}\n")
+        print(f"分类错误的节点信息已保存到: {misclassified_output_path}")
+
+
+        # 根据您的要求，剔除在评估中表现不佳的类别
+        labels_to_exclude = [2, 6, 9, 10]  # F1=0 的类别: FILE_OBJECT, PROCESS, FILE_OBJECT_LINK, FILE_OBJECT_BLOCK
+        exclude_names = [node_type_names.get(l) for l in labels_to_exclude]
+        print(f"\n从可视化中剔除以下类别: {exclude_names}")
+        
+        mask = ~np.isin(all_labels, labels_to_exclude)
+        embeddings_after_filter = all_embeddings[mask]
+        labels_after_filter = all_labels[mask]
+        # 同样需要过滤错误分类的索引
+        preds_after_filter = all_preds[mask]
+        
+        nodes_after_filter = len(labels_after_filter)
+        print(f"剔除后剩余节点数: {nodes_after_filter}")
+
+        # 找出过滤后的错误分类节点
+        misclassified_mask_after_filter = labels_after_filter != preds_after_filter
+        
+        # 为了性能，如果节点数太多，则随机抽样一部分进行可视化
+        sample_size = 10000
+        if nodes_after_filter > sample_size:
+            print(f"节点总数 ({nodes_after_filter}) 较多，将随机抽取 {sample_size} 个节点进行可视化...")
+            # 确保抽样时同时包含正确和错误分类的节点，以保持代表性
+            correctly_classified_indices = np.where(~misclassified_mask_after_filter)[0]
+            misclassified_indices_after_filter = np.where(misclassified_mask_after_filter)[0]
+            
+            num_misclassified_to_sample = int(sample_size * (len(misclassified_indices_after_filter) / nodes_after_filter))
+            num_correct_to_sample = sample_size - num_misclassified_to_sample
+            
+            # 安全地选择样本
+            selected_misclassified_indices = np.random.choice(
+                misclassified_indices_after_filter, 
+                min(num_misclassified_to_sample, len(misclassified_indices_after_filter)), 
+                replace=False
+            )
+            selected_correct_indices = np.random.choice(
+                correctly_classified_indices, 
+                min(num_correct_to_sample, len(correctly_classified_indices)), 
+                replace=False
+            )
+            
+            indices = np.concatenate([selected_correct_indices, selected_misclassified_indices])
+            np.random.shuffle(indices) # 随机打乱索引
+
+            embeddings_for_tsne = embeddings_after_filter[indices]
+            labels_for_tsne = labels_after_filter[indices]
+            misclassified_for_tsne = misclassified_mask_after_filter[indices]
+        else:
+            print(f"使用全部 {nodes_after_filter} 个节点进行可视化...")
+            embeddings_for_tsne = embeddings_after_filter
+            labels_for_tsne = labels_after_filter
+            misclassified_for_tsne = misclassified_mask_after_filter
+
+        # 执行 t-SNE
+        # 增加迭代次数和早期夸大系数以获得更好的簇分离效果
+        tsne = TSNE(
+            n_components=2, 
+            perplexity=30, 
+            n_iter=2500,          # 增加迭代次数
+            early_exaggeration=20, # 增大早期夸大系数
+            random_state=42, 
+            n_jobs=-1             # 使用所有CPU核心加速
+        )
+        tsne_results = tsne.fit_transform(embeddings_for_tsne)
+        
+        end_time = time.time()
+        print(f"t-SNE 降维完成，耗时: {end_time - start_time:.2f} 秒")
+
+        # ------------------ 离群点检测 (Anomaly Detection) ------------------
+        print("\n正在使用 LOF (Local Outlier Factor) 检测异常/离群节点...")
+        # 使用 Local Outlier Factor (LOF) 识别离群点
+        # contamination 参数表示数据集中离群点的比例, 这里假设为2%
+        lof = LocalOutlierFactor(n_neighbors=30, contamination=0.02, novelty=False, n_jobs=-1)
+        outlier_preds = lof.fit_predict(tsne_results)  # -1 表示离群点, 1 表示正常点
+
+        outlier_mask_in_tsne = outlier_preds == -1
+        outlier_indices_in_tsne = np.where(outlier_mask_in_tsne)[0]
+        print(f"检测到 {len(outlier_indices_in_tsne)} 个异常(离群)节点。")
+
+        # 追踪离群点在原始数据集中的索引并保存
+        original_indices_all = np.arange(len(all_labels))
+        indices_after_filter = original_indices_all[mask]
+
+        if nodes_after_filter > sample_size:
+            original_indices_of_sampled_points = indices_after_filter[indices]
+            anomalous_original_indices = original_indices_of_sampled_points[outlier_indices_in_tsne]
+        else:
+            anomalous_original_indices = indices_after_filter[outlier_indices_in_tsne]
+
+        anomalous_output_path = './anomalous_nodes.txt'
+        with open(anomalous_output_path, 'w') as f:
+            f.write("Anomalous (Outlier) Node Information\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"{'Original Index':<15} {'True Label':<25} {'Predicted Label':<25}\n")
+            f.write("-" * 80 + "\n")
+            for idx in anomalous_original_indices:
+                true_label = all_labels[idx]
+                pred_label = all_preds[idx]
+                true_label_name = node_type_names.get(true_label, f"类型_{true_label}")
+                pred_label_name = node_type_names.get(pred_label, f"类型_{pred_label}")
+                f.write(f"{idx:<15} {true_label_name:<25} {pred_label_name:<25}\n")
+        print(f"异常(离群)节点信息已保存到: {anomalous_output_path}")
+        
+        # 绘图
+        plt.figure(figsize=(16, 12))
+        unique_labels_in_plot = np.unique(labels_for_tsne)
+        
+        # 使用 matplotlib 默认的颜色循环
+        colors = plt.cm.get_cmap('tab20', len(unique_labels_in_plot))
+        # 定义一组不同的标记样式
+        markers = ['o', 's', '^', 'D', 'P', '*', 'X', 'v', '<', '>']
+
+        for i, label in enumerate(unique_labels_in_plot):
+            # 找到当前类别且正确分类的节点
+            idx = (labels_for_tsne == label) & ~misclassified_for_tsne
+            plt.scatter(
+                tsne_results[idx, 0], 
+                tsne_results[idx, 1], 
+                color=colors(i),
+                marker=markers[i % len(markers)], # 为不同类别循环使用不同标记
+                label=node_type_names.get(label, f"类型_{label}"),
+                alpha=0.7,
+                s=25,      # 适当增大点的大小以便观察标记
+                edgecolors='k', # 为点添加黑色边框
+                linewidths=0.5
+            )
+        
+        # 单独绘制并标注所有分类错误的节点
+        misclassified_idx_in_tsne = np.where(misclassified_for_tsne)[0]
+        if len(misclassified_idx_in_tsne) > 0:
+            plt.scatter(
+                tsne_results[misclassified_idx_in_tsne, 0],
+                tsne_results[misclassified_idx_in_tsne, 1],
+                c='red',
+                marker='x',
+                s=50,
+                label='Misclassified',
+                alpha=0.9,
+                linewidths=1.5
+            )
+
+        # 单独绘制并标注所有异常(离群)节点
+        if len(outlier_indices_in_tsne) > 0:
+            plt.scatter(
+                tsne_results[outlier_indices_in_tsne, 0],
+                tsne_results[outlier_indices_in_tsne, 1],
+                facecolors='none',
+                edgecolors='purple',
+                s=150,
+                linewidths=2,
+                label='Anomalous (Outlier)',
+                marker='o'
+            )
+
+
+        plt.title("t-SNE Visualization of Node Embeddings (with Misclassified and Anomalous Points)", fontsize=18)
+        plt.xlabel("t-SNE Dimension 1", fontsize=14)
+        plt.ylabel("t-SNE Dimension 2", fontsize=14)
+        
+        # 创建一个更易读的图例
+        legend = plt.legend(loc='best', shadow=True, fontsize='large', bbox_to_anchor=(1.05, 1), borderaxespad=0.)
+        legend.set_title("Node Types", prop={'size':'x-large'})
+        
+        plt.grid(True, linestyle='--', alpha=0.6)
+        plt.tight_layout()
+        
+        # 保存图像
+        save_path = './figs/tsne_node_embeddings.png'
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"t-SNE 可视化图已保存到: {save_path}")
+        plt.show()
 
     else:
         metadata = load_metadata(dataset_name)
