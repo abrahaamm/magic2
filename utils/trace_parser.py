@@ -235,7 +235,8 @@ def append_uuid2entity_enhanced(entry, uuid2entity):
     elif any(key in entry for key in
              [f'{PREFIX}TimeMarker', f'{PREFIX}StartMarker', f'{PREFIX}EndMarker',
               f'{PREFIX}RegistryKeyObject', f'{PREFIX}UnitDependency']):
-        return "SKIPPED_MARKER"
+        # 完全忽略这些标记类型，不创建任何实体记录
+        return None
 
     return None
 
@@ -399,15 +400,27 @@ def collect_and_output_statistics(dataset, uuid2entity):
     # 输出实体类型分布
     print("\n【实体类型分布】")
     print("-" * 40)
-    for entity_type, count in simplified_type_stats.most_common():
-        percentage = count / sum(simplified_type_stats.values()) * 100
+    
+    # 过滤掉应该被忽略的实体类型（与darpa.py保持一致）
+    exclude_types = {
+        'SRCSINK', 'SrcSinkObject',           # SrcSink相关类型
+        'SKIPPED_MARKER',                     # 时间标记等（darpa.py中完全忽略）
+        'ProvenanceTagNode', 'PROVENANCE',    # 来源标记（通常不参与统计）
+        'Principal', 'PRINCIPAL'              # 主体（通常不参与统计）
+    }
+    
+    filtered_stats = {k: v for k, v in simplified_type_stats.items() 
+                     if k not in exclude_types}
+    
+    for entity_type, count in Counter(filtered_stats).most_common():
+        percentage = count / sum(filtered_stats.values()) * 100
         print(f"{entity_type:15}: {count:,} ({percentage:.2f}%)")
     
-    print(f"\n总实体数量: {sum(simplified_type_stats.values()):,}")
+    print(f"\n总实体数量: {sum(filtered_stats.values()):,}")
     
     # 检查是否有UNIT类型
-    if 'UNIT' in simplified_type_stats:
-        print(f"\n✅ UNIT类型已正确识别: {simplified_type_stats['UNIT']} 个")
+    if 'UNIT' in filtered_stats:
+        print(f"\n✅ UNIT类型已正确识别: {filtered_stats['UNIT']} 个")
     else:
         print(f"\n❌ 未发现UNIT类型")
     
@@ -444,7 +457,6 @@ def collect_edge_statistics_for_file(dataset, file, stats, uuid2entity):
     
     unit_count = 0  # 添加UNIT类型计数器
     conversion_examples = {}  # 记录类型转换示例
-    unit_debug_info = []  # 调试：记录UNIT类型的详细信息
     
     try:
         with open(edge_file_path, 'r', encoding='utf-8') as f:
@@ -459,12 +471,8 @@ def collect_edge_statistics_for_file(dataset, file, stats, uuid2entity):
                         src_id, src_type, dst_id, dst_type, edge_type, timestamp = parts[:6]
                         
                         # 获取简化的类型名称
-                        # 先检查是否可能包含UNIT类型，再决定是否开启调试
-                        debug_mode = (src_type == 'UNIT' or dst_type == 'UNIT' or 
-                                    'SUBJECT_UNIT' in str(src_type) or 'SUBJECT_UNIT' in str(dst_type))
-                        
-                        src_unified_type = get_unified_type_debug(src_id, src_type, uuid2entity, debug=debug_mode)
-                        dst_unified_type = get_unified_type_debug(dst_id, dst_type, uuid2entity, debug=debug_mode)
+                        src_unified_type = get_unified_type(src_id, src_type, uuid2entity)
+                        dst_unified_type = get_unified_type(dst_id, dst_type, uuid2entity)
                         
                         # 记录类型转换示例
                         if src_type not in conversion_examples:
@@ -475,11 +483,9 @@ def collect_edge_statistics_for_file(dataset, file, stats, uuid2entity):
                         # 特别关注UNIT类型的检测
                         if src_unified_type == 'UNIT':
                             unit_count += 1
-                            unit_debug_info.append(f"主体: {src_id} | 原始: {src_type} -> 统一: {src_unified_type}")
                         
                         if dst_unified_type == 'UNIT':
                             unit_count += 1
-                            unit_debug_info.append(f"客体: {dst_id} | 原始: {dst_type} -> 统一: {dst_unified_type}")
                         
                         # 统计主体类型
                         if src_unified_type:
@@ -495,24 +501,14 @@ def collect_edge_statistics_for_file(dataset, file, stats, uuid2entity):
     except Exception as e:
         print(f"收集统计信息时出错 {file}: {e}")
     
-    # 输出文件级别的统计信息
-    if unit_count > 0:
-        print(f"🔍 调试：文件 {file} 统计阶段发现 {unit_count} 个UNIT类型实体")
-        # 显示前3个UNIT类型的详细信息
-        for i, info in enumerate(unit_debug_info[:3]):
-            print(f"  {info}")
-        if len(unit_debug_info) > 3:
-            print(f"  ... 还有 {len(unit_debug_info) - 3} 个UNIT实体")
-    else:
-        print(f"🔍 调试：文件 {file} 统计阶段未发现UNIT类型实体")
-    
     # 输出类型转换示例（仅显示前10个）
-    print(f"文件 {file} 的类型转换示例:")
-    for i, (orig, unified) in enumerate(list(conversion_examples.items())[:10]):
-        if orig != unified:  # 只显示有转换的
-            print(f"  {orig} -> {unified}")
-    if len(conversion_examples) > 10:
-        print(f"  ... 共{len(conversion_examples)}种类型")
+    if len(conversion_examples) > 0:
+        print(f"文件 {file} 的类型转换示例:")
+        for i, (orig, unified) in enumerate(list(conversion_examples.items())[:10]):
+            if orig != unified:  # 只显示有转换的
+                print(f"  {orig} -> {unified}")
+        if len(conversion_examples) > 10:
+            print(f"  ... 共{len(conversion_examples)}种类型")
 
 
 def collect_edge_statistics(dataset):
@@ -574,17 +570,19 @@ def print_entity_statistics(entity_type, type_counts):
     filtered_counts = {}
     
     if entity_type == 'sbj':
-        # 主体统计：包含所有类型（包括UNIT）
-        filtered_counts = type_counts.copy()
+        # 主体统计：排除SrcSink相关类型
+        exclude_types = {'SRCSINK', 'SrcSinkObject'}
+        filtered_counts = {k: v for k, v in type_counts.items() if k not in exclude_types}
     elif entity_type == 'obj':
-        # 客体统计：排除UNKNOWN和IPC，但包含UNIT
-        exclude_types = {'UNKNOWN', 'IPC'}
+        # 客体统计：排除UNKNOWN、IPC和SrcSink相关类型
+        exclude_types = {'UNKNOWN', 'IPC', 'SRCSINK', 'SrcSinkObject'}
         filtered_counts = {k: v for k, v in type_counts.items() if k not in exclude_types}
     
     if not filtered_counts:
         return
     
-    total_count = sum(filtered_counts.values())
+    # 使用所有类型的总数来计算比例（包括被过滤的类型），而不是只用显示类型的总数
+    total_count = sum(type_counts.values())  # 修改：使用所有类型的总数
     print(f"\n[{entity_type}] 种类及比例:")
     
     # 按数量降序排列
@@ -813,7 +811,7 @@ def preprocess_dataset(dataset):
             fw.close()
             f.close()
     
-    print(f"🔍 调试：总共生成的包含UNIT类型的边数量: {total_unit_edges}")
+    print(f"总共生成的包含UNIT类型的边数量: {total_unit_edges}")
     if len(id_nodename_map) != 0:
         fw = open('../data/{}/'.format(dataset) + 'names.json', 'w', encoding='utf-8')
         json.dump(id_nodename_map, fw)
