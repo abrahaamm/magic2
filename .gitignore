@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+
+# Large data files
+*.pkl
+*.pt
+*.zip
+MAGIC.tar.gz
+
+# Directories
+checkpoints/
+data/
+eval_result/
+
+# macOS files
+.DS_Store
+._* 
