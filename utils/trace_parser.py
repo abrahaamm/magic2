@@ -282,8 +282,6 @@ def get_unified_type_debug(entity_id, original_type, uuid2entity, debug=False):
             else:
                 # 处理没有PLUS分隔符的类型（如UnnamedPipeObject等）
                 normalized = normalize_simple_type(entity_info)
-                if debug:
-                    print(f"    🔧 简单类型转换: {entity_info} -> {normalized}")
                 return normalized
     else:
         if debug:
