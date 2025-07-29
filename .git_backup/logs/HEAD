@@ -1,0 +1,5 @@
+0000000000000000000000000000000000000000 738b520ede7a3d7e1629679c917c3711de4df3c8 Abraham Lau <142099976+abrahaamm@users.noreply.github.com> 1751966954 +0800	commit (initial): Initial commit
+738b520ede7a3d7e1629679c917c3711de4df3c8 0000000000000000000000000000000000000000 Abraham Lau <142099976+abrahaamm@users.noreply.github.com> 1751966975 +0800	Branch: renamed refs/heads/main to refs/heads/master
+0000000000000000000000000000000000000000 738b520ede7a3d7e1629679c917c3711de4df3c8 Abraham Lau <142099976+abrahaamm@users.noreply.github.com> 1751966975 +0800	Branch: renamed refs/heads/main to refs/heads/master
+738b520ede7a3d7e1629679c917c3711de4df3c8 738b520ede7a3d7e1629679c917c3711de4df3c8 liuxy <liuxy@admin.(none)> 1753242340 +0000	checkout: moving from master to magic_node_classification
+738b520ede7a3d7e1629679c917c3711de4df3c8 83af5b5ced5f5a3e009df5cc868e25f40d5dfe73 abrahaamm <liuxuyan23@mails.tsinghua.edu.cn> 1753242403 +0000	commit: Add magic node classification implementation with updated type mappings
