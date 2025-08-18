@@ -13,9 +13,22 @@ import os
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 import time
+import json
 from sklearn.neighbors import LocalOutlierFactor
 
 warnings.filterwarnings('ignore')
+
+# DARPA 风格分类常量
+PLUS = '>>>>'
+
+def extract_type_from_darpa_format(darpa_entity):
+    """
+    从 DARPA 格式的实体字符串中提取类型
+    例如：'PROCESS>>>>bash' -> 'PROCESS'
+    """
+    if darpa_entity and PLUS in darpa_entity:
+        return darpa_entity.split(PLUS)[0]
+    return darpa_entity
 
 
 # ------------------ 节点分类评估 (trace 数据集) ------------------
@@ -67,6 +80,18 @@ def main(main_args):
         n_dim = metadata['node_feature_dim']
         e_dim = metadata['edge_feature_dim']
 
+        # 动态从 node_type_mapping.json 加载节点类型名称映射
+        try:
+            with open(f'./data/{dataset_name}/node_type_mapping.json', 'r') as f:
+                node_type_mapping = json.load(f)
+                # JSON加载的键是字符串，需要转回整数
+                node_type_names = {int(k): v for k, v in node_type_mapping.items()}
+                num_classes = len(node_type_names) # <-- 关键修改
+            print(f"成功从文件加载节点类型映射，共 {num_classes} 个类别。")
+        except FileNotFoundError:
+            print(f"错误: 未找到 'node_type_mapping.json'。请先运行 trace_parser.py。")
+            return
+
         # 构建并加载编码器
         args_clone = main_args
         args_clone.n_dim = n_dim
@@ -78,7 +103,7 @@ def main(main_args):
         encoder.eval()
 
         # 构建并加载分类器
-        classifier = NodeClassifier(encoder.output_hidden_dim, n_dim).to(device)
+        classifier = NodeClassifier(encoder.output_hidden_dim, num_classes).to(device) # <-- 使用动态 num_classes
         classifier.load_state_dict(torch.load(classifier_path, map_location=device))
         classifier.eval()
 
@@ -90,21 +115,6 @@ def main(main_args):
         print(f"评估测试集中的 {n_test} 个图...")
         print("="*80 + "\n")
         
-        # 节点类型名称映射
-        node_type_names = {
-            0: "SUBJECT_PROCESS",
-            1: "SRCSINK_UNKNOWN",
-            2: "FILE_OBJECT_UNIX_SOCKET",
-            3: "NetFlowObject",
-            4: "FILE_OBJECT_FILE",
-            5: "MemoryObject",
-            6: "FILE_OBJECT_CHAR",
-            7: "FILE_OBJECT_DIR",
-            8: "UnnamedPipeObject",
-            9: "FILE_OBJECT_LINK",
-            10: "FILE_OBJECT_BLOCK"
-        }
-
         with torch.no_grad():
             for i in range(n_test):
                 g = load_entity_level_dataset(dataset_name, 'test', i).to(device)
@@ -134,7 +144,7 @@ def main(main_args):
         print("\n")
         
         # 获取详细的分类报告
-        class_names = [node_type_names.get(i, f"类型_{i}") for i in range(n_dim)]
+        class_names = [node_type_names.get(i, f"类型_{i}") for i in range(num_classes)] # <-- 使用动态 num_classes
         
         # 计算每个类别的样本数量和比例
         unique_labels, label_counts = np.unique(all_labels, return_counts=True)
@@ -173,6 +183,42 @@ def main(main_args):
               f"{total_nodes:>12,d} {100:>9.2f}%")
         print("=" * 120)
 
+        # ------------------ DARPA 风格分类统计 ------------------
+        print("\n正在进行 DARPA 风格分类统计...")
+        
+        # 统计主体和对象类型
+        # 注意：在节点分类任务中，我们无法直接区分主体和对象
+        # 因此我们将所有节点按类型进行统计
+        
+        print("\n节点类型分布统计:")
+        print("=" * 60)
+        
+        darpa_type_counts = {}
+        total_nodes = len(all_labels)
+        
+        for label_id, pred_id in zip(all_labels, all_preds):
+            type_name = node_type_names.get(label_id, f"UNKNOWN_{label_id}")
+            if type_name not in darpa_type_counts:
+                darpa_type_counts[type_name] = {'true': 0, 'pred': 0}
+            darpa_type_counts[type_name]['true'] += 1
+            
+            pred_type_name = node_type_names.get(pred_id, f"UNKNOWN_{pred_id}")
+            if pred_type_name not in darpa_type_counts:
+                darpa_type_counts[pred_type_name] = {'true': 0, 'pred': 0}
+            darpa_type_counts[pred_type_name]['pred'] += 1
+        
+        print(f"{'类型名称':<15} {'真实数量':<12} {'比例':<10} {'预测数量':<12} {'比例':<10}")
+        print("-" * 60)
+        
+        for type_name in sorted(darpa_type_counts.keys()):
+            true_count = darpa_type_counts[type_name]['true']
+            pred_count = darpa_type_counts[type_name]['pred']
+            true_ratio = (true_count / total_nodes) * 100
+            pred_ratio = (pred_count / total_nodes) * 100
+            print(f"{type_name:<15} {true_count:<12,d} {true_ratio:<9.2f}% {pred_count:<12,d} {pred_ratio:<9.2f}%")
+        
+        print("=" * 60)
+
         # ------------------ t-SNE 可视化 ------------------
         print("\n正在进行 t-SNE 降维和可视化...")
         start_time = time.time()
@@ -201,10 +247,13 @@ def main(main_args):
         print(f"分类错误的节点信息已保存到: {misclassified_output_path}")
 
 
-        # 根据您的要求，剔除在评估中表现不佳的类别
-        labels_to_exclude = [2, 6, 9, 10]  # F1=0 的类别: FILE_OBJECT, PROCESS, FILE_OBJECT_LINK, FILE_OBJECT_BLOCK
+        # 对于新的分类体系，我们暂时不排除任何类别，先观察所有类别的表现
+        labels_to_exclude = []  # 新分类体系中暂不排除任何类别
         exclude_names = [node_type_names.get(l) for l in labels_to_exclude]
-        print(f"\n从可视化中剔除以下类别: {exclude_names}")
+        if exclude_names:
+            print(f"\n从可视化中剔除以下类别: {exclude_names}")
+        else:
+            print(f"\n使用所有 {num_classes} 个类别进行可视化")
         
         mask = ~np.isin(all_labels, labels_to_exclude)
         embeddings_after_filter = all_embeddings[mask]

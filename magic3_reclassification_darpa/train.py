@@ -11,7 +11,6 @@ from dgl.dataloading import GraphDataLoader
 from model.train import batch_level_train
 from utils.utils import set_random_seed, create_optimizer
 from utils.config import build_args
-import json
 warnings.filterwarnings('ignore')
 
 
@@ -51,17 +50,6 @@ class NodeClassifier(nn.Module):
 def train_node_classification_trace(device, dataset_name, main_args):
     """专门为trace数据集训练节点分类模型"""
     metadata = load_metadata(dataset_name)
-
-    # --- 新增：加载节点类型映射 ---
-    try:
-        with open(f'./data/{dataset_name}/node_type_mapping.json', 'r') as f:
-            node_type_mapping = json.load(f)
-        num_classes = len(node_type_mapping)
-        print(f"成功加载节点类型映射，共 {num_classes} 个类别。")
-    except FileNotFoundError:
-        print("错误：未找到 node_type_mapping.json，请先运行 trace_parser.py 生成映射文件。")
-        return
-
     main_args.n_dim = metadata['node_feature_dim']
     main_args.e_dim = metadata['edge_feature_dim']
     
@@ -69,14 +57,23 @@ def train_node_classification_trace(device, dataset_name, main_args):
     encoder = build_model(main_args)
     encoder = encoder.to(device)
     
-    # 添加节点分类头
-    # num_classes = main_args.n_dim  # 节点类型数量等于特征维度
+    # 添加节点分类头 - 固定使用5类 (UNIT=0, FILE=1, NETFLOW=2, PROCESS=3, DIR=4)
+    num_classes = 5  # 与another目录保持一致的5类分类
+    print(f"✅ 强制使用与another一致的5类节点分类系统")
+    
+    # 确保类别ID映射与another完全一致
+    another_class_mapping = {0: 'UNIT', 1: 'FILE', 2: 'NETFLOW', 3: 'PROCESS', 4: 'DIR'}
+    print(f"📊 类别映射: {another_class_mapping}")
     node_classifier = NodeClassifier(
         input_dim=encoder.output_hidden_dim,
         num_classes=num_classes,
         hidden_dim=64,
         dropout=0.1
     ).to(device)
+    
+    print(f"📊 使用与another一致的5类节点分类: UNIT(0), FILE(1), NETFLOW(2), PROCESS(3), DIR(4)")
+    print(f"📝 输入数据格式: another标准格式 (数字ID)")
+    print(f"🔍 应用another系统的实体映射规则和过滤逻辑")
     
     # 计算类别权重
     print("计算训练数据的类别分布...")
@@ -89,24 +86,36 @@ def train_node_classification_trace(device, dataset_name, main_args):
         for class_id in range(num_classes):
             class_counts[class_id] += (node_labels == class_id).sum().item()
     
-    # 计算类别权重 - 使用平衡策略
+    # 计算类别权重 - 基于实际数据分布，与another保持一致的处理方式
     total_samples = class_counts.sum()
-    class_weights = total_samples / (num_classes * class_counts + 1e-6)  # 避免除零
-    class_weights = torch.log(class_weights + 1)  # 对极度不平衡的类别使用对数缩放
-    class_weights = class_weights / class_weights.sum() * num_classes  # 归一化权重
+    computed_weights = total_samples / (num_classes * class_counts + 1e-6)  # 避免除零
+    
+    print(f"计算得到的类别权重: {computed_weights}")
+    
+    # 选择权重策略：可以使用计算得到的权重，或使用与another相同的固定权重
+    use_fixed_weights = False  # 设为True使用固定权重，False使用计算权重
+    
+    if use_fixed_weights:
+        # 使用与another目录相同的固定权重 [1.0, 100.0, 160.0, 10240.0, 12800.0]
+        class_weights = torch.tensor([1.0, 100.0, 160.0, 10240.0, 12800.0], dtype=torch.float).to(device)
+        print(f"使用固定类别权重 (与another一致)")
+    else:
+        # 使用计算得到的权重
+        class_weights = computed_weights.to(device)
+        print(f"使用基于数据分布计算的类别权重")
     
     print(f"类别分布:")
     for i in range(num_classes):
-        print(f"  类别 {i}: {int(class_counts[i]):,} 样本 (权重: {class_weights[i]:.3f})")
-    
-    class_weights = class_weights.to(device)
+        class_names = ['UNIT', 'FILE', 'NETFLOW', 'PROCESS', 'DIR']
+        print(f"  类别 {i} ({class_names[i]}): {int(class_counts[i]):,} 样本 (权重: {class_weights[i]:.1f})")
     
     # 创建优化器
     encoder_optimizer = create_optimizer(main_args.optimizer, encoder, main_args.lr, main_args.weight_decay)
     classifier_optimizer = torch.optim.Adam(node_classifier.parameters(), lr=main_args.lr * 0.1)
     
-    # 使用加权损失函数
+    # 创建加权损失函数
     classification_criterion = nn.CrossEntropyLoss(weight=class_weights)
+    print(f"最终使用的类别权重 [UNIT, FILE, NETFLOW, PROCESS, DIR]: {class_weights.cpu().numpy()}")
     
     # 训练循环
     epoch_iter = tqdm(range(main_args.max_epoch))
